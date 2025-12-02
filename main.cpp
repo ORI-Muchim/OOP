@@ -232,7 +232,11 @@ struct Position {
     double avgBuyPrice;
     time_t buyTimestamp;
 
-    // TODO: 팀원 B 구현
+    // 팀원 B: 포지션 생성자
+    Position(Stock* s = nullptr, int qty = 0, double price = 0.0)
+        : stock(s), quantity(qty), avgBuyPrice(price) {
+        buyTimestamp = time(nullptr);
+    }
 };
 
 // ============================================================
@@ -329,7 +333,217 @@ public:
 // ============================================================
 // 팀원 B: Trader 구현
 // ============================================================
-// TODO: 팀원 B 구현
+Trader::Trader(const string& name, double initialCash)
+    : username(name), cash(initialCash) {
+    // detector는 Phase 3에서 DisruptionDetector 구현 시 생성 예정
+}
+
+bool Trader::buy(const string& stockName, int qty, Market& m) {
+    if (qty <= 0) return false;
+
+    Stock* stock = m.getStockByName(stockName);
+    if (!stock) return false;
+
+    double price = stock->getCurrentPrice();
+    double cost = price * qty;
+
+    if (cost > cash) return false;
+
+    // 현금 차감
+    cash -= cost;
+
+    // 포트폴리오 업데이트 (가중 평균 단가)
+    auto it = portfolio.find(stockName);
+    if (it == portfolio.end()) {
+        portfolio[stockName] = Position(stock, qty, price);
+    } else {
+        Position& pos = it->second;
+        int newQty = pos.quantity + qty;
+        double newAvg =
+            (pos.avgBuyPrice * pos.quantity + price * qty) / newQty;
+        pos.quantity = newQty;
+        pos.avgBuyPrice = newAvg;
+        pos.buyTimestamp = time(nullptr);
+    }
+
+    // 거래 내역 기록
+    Transaction t(stockName, "BUY", qty, price, false);
+    m.addTransaction(t);
+
+    return true;
+}
+
+bool Trader::sell(const string& stockName, int qty, Market& m) {
+    if (qty <= 0) return false;
+
+    auto it = portfolio.find(stockName);
+    if (it == portfolio.end()) return false;
+
+    Position& pos = it->second;
+    if (qty > pos.quantity) return false;
+
+    Stock* stock = pos.stock ? pos.stock : m.getStockByName(stockName);
+    if (!stock) return false;
+
+    double price = stock->getCurrentPrice();
+    double revenue = price * qty;
+
+    // 포지션 및 현금 업데이트
+    pos.quantity -= qty;
+    cash += revenue;
+
+    if (pos.quantity == 0) {
+        portfolio.erase(it);
+    }
+
+    // 거래 내역 기록
+    Transaction t(stockName, "SELL", qty, price, false);
+    m.addTransaction(t);
+
+    return true;
+}
+
+void Trader::autoTrade(Market& m) {
+    // Phase 3에서 DisruptionDetector와 연동 예정
+    // 현재 단계에서는 자동 매매 로직 미구현
+    (void)m; // 미사용 매개변수 경고 방지
+}
+
+bool Trader::buyGapPosition(const string& stockName, int qty, Market& m) {
+    if (qty <= 0) return false;
+
+    Stock* stock = m.getStockByName(stockName);
+    if (!stock) return false;
+
+    double price = stock->getCurrentPrice();
+    double cost = price * qty;
+
+    if (cost > cash) return false;
+
+    cash -= cost;
+
+    auto it = gapPositions.find(stockName);
+    if (it == gapPositions.end()) {
+        gapPositions[stockName] = Position(stock, qty, price);
+    } else {
+        Position& pos = it->second;
+        int newQty = pos.quantity + qty;
+        double newAvg =
+            (pos.avgBuyPrice * pos.quantity + price * qty) / newQty;
+        pos.quantity = newQty;
+        pos.avgBuyPrice = newAvg;
+        pos.buyTimestamp = time(nullptr);
+    }
+
+    Transaction t(stockName, "GAP_BUY", qty, price, true);
+    m.addTransaction(t);
+
+    return true;
+}
+
+bool Trader::closeGapPosition(const string& stockName, Market& m) {
+    auto it = gapPositions.find(stockName);
+    if (it == gapPositions.end()) return false;
+
+    Position& pos = it->second;
+    if (pos.quantity <= 0) return false;
+
+    Stock* stock = pos.stock ? pos.stock : m.getStockByName(stockName);
+    if (!stock) return false;
+
+    int qty = pos.quantity;
+    double price = stock->getCurrentPrice();
+    double revenue = price * qty;
+
+    cash += revenue;
+
+    Transaction t(stockName, "GAP_SELL", qty, price, true);
+    m.addTransaction(t);
+
+    gapPositions.erase(it);
+
+    return true;
+}
+
+void Trader::closeAllGapPositions(Market& m) {
+    // 키를 복사해두고 순회 중 map을 수정
+    vector<string> keys;
+    keys.reserve(gapPositions.size());
+    for (const auto& kv : gapPositions) {
+        keys.push_back(kv.first);
+    }
+
+    for (const string& name : keys) {
+        closeGapPosition(name, m);
+    }
+}
+
+bool Trader::hasOpenGapPositions() const {
+    return !gapPositions.empty();
+}
+
+int Trader::getPositionQuantity(const string& stockName) const {
+    int qty = 0;
+    auto itNormal = portfolio.find(stockName);
+    if (itNormal != portfolio.end()) {
+        qty += itNormal->second.quantity;
+    }
+    auto itGap = gapPositions.find(stockName);
+    if (itGap != gapPositions.end()) {
+        qty += itGap->second.quantity;
+    }
+    return qty;
+}
+
+double Trader::getTotalAssetValue(Market& m) const {
+    double total = cash;
+
+    // 일반 포트폴리오 가치
+    for (const auto& kv : portfolio) {
+        const string& name = kv.first;
+        const Position& pos = kv.second;
+        Stock* stock = pos.stock ? pos.stock : m.getStockByName(name);
+        if (!stock) continue;
+        total += stock->getCurrentPrice() * pos.quantity;
+    }
+
+    // 갭 포지션 가치
+    for (const auto& kv : gapPositions) {
+        const string& name = kv.first;
+        const Position& pos = kv.second;
+        Stock* stock = pos.stock ? pos.stock : m.getStockByName(name);
+        if (!stock) continue;
+        total += stock->getCurrentPrice() * pos.quantity;
+    }
+
+    return total;
+}
+
+double Trader::getGapPositionProfit(const string& stockName) const {
+    auto it = gapPositions.find(stockName);
+    if (it == gapPositions.end()) return 0.0;
+
+    const Position& pos = it->second;
+    if (pos.quantity <= 0 || pos.avgBuyPrice <= 0.0) return 0.0;
+
+    // 현재가는 Market 객체가 필요하므로, 수익률 계산은
+    // DisruptedState/NormalState에서 필요 시 별도 로직에서 처리 가능
+    // 여기서는 매수가 기준의 누적 수익률만 반환
+    // (현재 단계에서는 Market 의존성을 줄이기 위해 0.0 반환)
+    return 0.0;
+}
+
+double Trader::getCash() const {
+    return cash;
+}
+
+const map<string, Position>& Trader::getGapPositions() const {
+    return gapPositions;
+}
+
+int Trader::getGapPositionCount() const {
+    return static_cast<int>(gapPositions.size());
+}
 
 // ============================================================
 // 팀원 C: DisruptionDetector 구현
